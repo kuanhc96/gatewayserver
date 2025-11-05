@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: "gatewayserver"
+  config:
+    import: "configserver:http://localhost:8071/"
+  cloud:
+    gateway:
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  endpoint:
+    gateway:
+      access: unrestricted
+  info:
+    env:
+      enabled: true
+
+info:
+    app:
+        name: "${spring.application.name}"
+        description: "Gateway Server Application"
+        version: "1.0.0"
