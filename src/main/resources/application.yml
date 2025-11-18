@@ -3,6 +3,8 @@ spring:
     name: "gatewayserver"
   config:
     import: "configserver:http://localhost:8071/"
+  main:
+    web-application-type: reactive
   cloud:
     gateway:
       server:
@@ -10,6 +12,18 @@ spring:
           discovery:
             locator:
               enabled: true
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOrigins: "*"
+                allowedMethods:
+                  - GET
+                  - POST
+                  - PUT
+                  - DELETE
+                  - OPTIONS
+                  - PATCH
+                allowedHeaders: "*"
 
 management:
   endpoints:
