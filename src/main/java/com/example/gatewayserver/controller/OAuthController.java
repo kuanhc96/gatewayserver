@@ -1,8 +1,12 @@
 package com.example.gatewayserver.controller;
 
+import java.io.IOException;
 import java.net.URI;
+import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
@@ -12,9 +16,11 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.lang.Nullable;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,11 +33,14 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import lombok.RequiredArgsConstructor;
 
+import com.example.gatewayserver.dto.AuthorizationState;
 import com.example.gatewayserver.dto.SessionDTO;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @RestController
 @RequiredArgsConstructor
 public class OAuthController {
+	private static final ObjectMapper mapper = new ObjectMapper();
 
 	private final CacheManager cacheManager;
 
@@ -68,10 +77,28 @@ public class OAuthController {
 	@PostMapping("/callback")
 	public ResponseEntity<?> callback(
 			ServerHttpRequest request,
+			ServerHttpResponse response,
+			WebSession session,
             @RequestParam(required = false) String code,
 			@RequestParam(required = false) String state,
-            @RequestParam(required = false) String error) {
+            @RequestParam(required = false) String error) throws IOException {
 		RestTemplate restTemplate = new RestTemplate();
+		ResponseEntity<Boolean> isValidStateResponse = restTemplate.exchange(
+				"http://localhost:9000/authState/verify",
+				HttpMethod.POST,
+				new HttpEntity<>(state),
+				Boolean.class
+		);
+
+		if (!isValidStateResponse.getBody()) {
+			throw new SecurityException("Invalid state parameter");
+		}
+
+		String[] parts = state.split("\\.");
+		String payload = parts[0];
+		byte[] jsonBytes = Base64.getUrlDecoder().decode(payload);
+		AuthorizationState authState = mapper.readValue(jsonBytes, AuthorizationState.class);
+
 		HttpHeaders headers = new HttpHeaders();
 		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
 		MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
@@ -96,10 +123,32 @@ public class OAuthController {
 					.token(tokenResponse.getBody().get("access_token").toString())
 					.build();
 			cacheManager.getCache("SESSION_CACHE").put(cookiesList.getFirst().getValue(), sessionDTO);
+
+			if (authState.rememberMe()) {
+				String cookieId = UUID.randomUUID().toString();
+				SessionDTO rememberMeSession = SessionDTO.builder()
+						.sessionId(cookieId)
+						.token(tokenResponse.getBody().get("refresh_token").toString())
+						.build();
+				cacheManager.getCache("SESSION_CACHE").put(cookieId, rememberMeSession);
+
+				ResponseCookie rememberMeCookie = ResponseCookie.from("RMC", cookieId)
+						.maxAge(Duration.ofHours(8))
+						.domain(null)
+						.path("/")
+						.httpOnly(true)
+						.secure(true)
+						.sameSite("Strict")
+						.partitioned(false)
+						.build();
+				response.addCookie(rememberMeCookie);
+
+			}
+
 			HttpHeaders responseHeaders = new HttpHeaders();
 			responseHeaders.add("Access-Control-Allow-Origin", "http://localhost:8080");
 			responseHeaders.add("Access-Control-Allow-Credentials", "true");
-			return ResponseEntity.ok().headers(responseHeaders).body(tokenResponse.getBody());
+			return ResponseEntity.ok().headers(responseHeaders).body(Map.of("successUrl", authState.successUrl()));
 		} else {
 			return ResponseEntity.status(tokenResponse.getStatusCode()).body("Failed to retrieve access token");
 		}
