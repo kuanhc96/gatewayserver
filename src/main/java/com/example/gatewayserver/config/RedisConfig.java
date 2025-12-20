@@ -9,6 +9,8 @@ import org.springframework.data.redis.cache.RedisCacheManager;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
 import org.springframework.data.redis.serializer.RedisSerializationContext;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 
 import com.example.gatewayserver.dto.SessionDTO;
 
@@ -21,5 +23,11 @@ public class RedisConfig {
 				.disableCachingNullValues()
 				.serializeValuesWith(RedisSerializationContext.SerializationPair.fromSerializer(new Jackson2JsonRedisSerializer<>(SessionDTO.class)));
 		return RedisCacheManager.builder(connectionFactory).cacheDefaults(redisCacheConfiguration).build();
+	}
+
+	@Bean
+	public JwtDecoder jwtDecoder() {
+		return NimbusJwtDecoder.withIssuerLocation("http://localhost:9000").build();
+
 	}
 }

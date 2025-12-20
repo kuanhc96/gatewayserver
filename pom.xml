@@ -76,6 +76,10 @@
             <artifactId>lombok</artifactId>
             <scope>provided</scope>
         </dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-oauth2-jose</artifactId>
+		</dependency>
     </dependencies>
 	<dependencyManagement>
 		<dependencies>

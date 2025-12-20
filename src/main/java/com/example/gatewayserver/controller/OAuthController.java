@@ -4,12 +4,15 @@ import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpCookie;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -20,9 +23,11 @@ import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpResponse;
-import org.springframework.lang.Nullable;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.util.ObjectUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -43,6 +48,7 @@ public class OAuthController {
 	private static final ObjectMapper mapper = new ObjectMapper();
 
 	private final CacheManager cacheManager;
+	private final JwtDecoder jwtDecoder;
 
 	@PostMapping("/checkSession")
 	public ResponseEntity<Boolean> checkSession(ServerHttpRequest request) {
@@ -58,6 +64,35 @@ public class OAuthController {
 		boolean hasSession = wrapper.get() != null;
 		return ResponseEntity.ok().headers(responseHeaders).body(hasSession);
 	}
+
+    @GetMapping("/openIdSession")
+    public ResponseEntity<Map<String, String>> getOpenIdSession(ServerHttpRequest request) {
+        HttpHeaders responseHeaders = new HttpHeaders();
+        responseHeaders.add("Access-Control-Allow-Origin", "http://localhost:8080");
+        responseHeaders.add("Access-Control-Allow-Credentials", "true");
+
+		List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
+		String openIdSessionId;
+		if (!ObjectUtils.isEmpty(rmcCookiesList)) {
+			openIdSessionId = rmcCookiesList.getFirst().getValue() + "_OPENID";
+		} else {
+			List<HttpCookie> jsessionCookiesList = request.getCookies().get("JSESSIONID");
+			openIdSessionId = jsessionCookiesList.getFirst().getValue() + "_OPENID";
+		}
+        Cache.ValueWrapper wrapper = cacheManager.getCache("SESSION_CACHE").get(openIdSessionId);
+        if (wrapper == null || wrapper.get() == null) {
+            return ResponseEntity.ok().headers(responseHeaders).body(new HashMap<>());
+        }
+        SessionDTO openIdSession = (SessionDTO) wrapper.get();
+		if (openIdSession == null) {
+			return ResponseEntity.ok().headers(responseHeaders).body(new HashMap<>());
+		}
+
+		Jwt jwt = jwtDecoder.decode(openIdSession.token());
+
+		Map<String, String> claims = jwt.getClaims().entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, entry -> String.valueOf(entry.getValue())));
+		return ResponseEntity.ok().headers(responseHeaders).body(claims);
+    }
 
 	@GetMapping("/authorize")
 	public void authorize(ServerHttpResponse response) {
@@ -116,23 +151,30 @@ public class OAuthController {
 				tokenRequest,
 				Map.class
 		);
-		if (tokenResponse.getStatusCode() == HttpStatus.OK) {
+		if (tokenResponse.getStatusCode() == HttpStatus.OK && tokenResponse.getBody() != null) {
+            String accessToken = tokenResponse.getBody().get("access_token").toString();
+            String refreshToken = tokenResponse.getBody().get("refresh_token").toString();
+            String idToken = tokenResponse.getBody().get("id_token").toString();
+
 			List<HttpCookie> cookiesList = request.getCookies().get("JSESSIONID");
+
+            String jSessionID = cookiesList.getFirst().getValue();
 			SessionDTO sessionDTO = SessionDTO.builder()
-					.sessionId(cookiesList.getFirst().getValue())
-					.token(tokenResponse.getBody().get("access_token").toString())
+					.sessionId(jSessionID)
+					.token(accessToken)
 					.build();
-			cacheManager.getCache("SESSION_CACHE").put(cookiesList.getFirst().getValue(), sessionDTO);
+			cacheManager.getCache("SESSION_CACHE").put(jSessionID, sessionDTO);
 
+            String openIdSessionId;
 			if (authState.rememberMe()) {
-				String cookieId = UUID.randomUUID().toString();
+				String rememberMeCookieId = UUID.randomUUID().toString();
 				SessionDTO rememberMeSession = SessionDTO.builder()
-						.sessionId(cookieId)
-						.token(tokenResponse.getBody().get("refresh_token").toString())
+						.sessionId(rememberMeCookieId)
+						.token(refreshToken)
 						.build();
-				cacheManager.getCache("SESSION_CACHE").put(cookieId, rememberMeSession);
+				cacheManager.getCache("SESSION_CACHE").put(rememberMeCookieId, rememberMeSession);
 
-				ResponseCookie rememberMeCookie = ResponseCookie.from("RMC", cookieId)
+				ResponseCookie rememberMeCookie = ResponseCookie.from("RMC", rememberMeCookieId)
 						.maxAge(Duration.ofHours(8))
 						.domain(null)
 						.path("/")
@@ -143,7 +185,20 @@ public class OAuthController {
 						.build();
 				response.addCookie(rememberMeCookie);
 
-			}
+                openIdSessionId = rememberMeCookieId + "_OPENID";
+                SessionDTO openIdSession = SessionDTO.builder()
+                        .sessionId(openIdSessionId)
+                        .token(idToken)
+                        .build();
+                cacheManager.getCache("SESSION_CACHE").put(openIdSessionId, openIdSession);
+			} else {
+                openIdSessionId = jSessionID + "_OPENID";
+                SessionDTO openIdSession = SessionDTO.builder()
+                        .sessionId(openIdSessionId)
+                        .token(idToken)
+                        .build();
+                cacheManager.getCache("SESSION_CACHE").put(openIdSessionId, openIdSession);
+            }
 
 			HttpHeaders responseHeaders = new HttpHeaders();
 			responseHeaders.add("Access-Control-Allow-Origin", "http://localhost:8080");
