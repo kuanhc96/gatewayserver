@@ -94,21 +94,6 @@ public class OAuthController {
 		return ResponseEntity.ok().headers(responseHeaders).body(claims);
     }
 
-	@GetMapping("/authorize")
-	public void authorize(ServerHttpResponse response) {
-		URI uri = UriComponentsBuilder.fromUriString("http://localhost:9000/oauth2/authorize")
-				.queryParam("client_id", "fe-client")
-				.queryParam("redirect_uri", "http://localhost:8080/callback")
-				.queryParam("response_type", "code")
-				.queryParam("scope", "openid")
-				.queryParam("state", "abcde")
-				.build().toUri();
-
-		response.getHeaders().setLocation(uri);
-		response.getHeaders().setAccessControlAllowOrigin("http://localhost:8080");
-		response.setStatusCode(HttpStatus.FOUND);
-	}
-
 	@PostMapping("/callback")
 	public ResponseEntity<?> callback(
 			ServerHttpRequest request,
