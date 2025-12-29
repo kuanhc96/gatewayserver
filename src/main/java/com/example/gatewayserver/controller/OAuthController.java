@@ -1,7 +1,6 @@
 package com.example.gatewayserver.controller;
 
 import java.io.IOException;
-import java.net.URI;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.HashMap;
@@ -11,9 +10,6 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.cache.Cache;
-import org.springframework.cache.CacheManager;
-import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpCookie;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -35,9 +31,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.WebSession;
-import org.springframework.web.util.UriComponentsBuilder;
 
-import jakarta.annotation.PreDestroy;
+import com.example.gatewayserver.dto.SessionResponse;
 import lombok.RequiredArgsConstructor;
 
 import com.example.gatewayserver.dto.AuthorizationState;
@@ -59,7 +54,7 @@ public class OAuthController {
 	private final RedisClient redisClient;
 
     @GetMapping("/checkSession")
-    public ResponseEntity<Map<String, String>> getOpenIdSession(ServerHttpRequest request) {
+    public ResponseEntity<SessionResponse> getOpenIdSession(ServerHttpRequest request) {
         HttpHeaders responseHeaders = new HttpHeaders();
         responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
         responseHeaders.add("Access-Control-Allow-Credentials", "true");
@@ -73,13 +68,14 @@ public class OAuthController {
 			idToken = redisClient.get(generateOpenIdTokenKey(jsessionCookiesList.getFirst().getValue()));
 		}
         if (idToken == null) {
-            return ResponseEntity.ok().headers(responseHeaders).body(new HashMap<>());
+            return ResponseEntity.ok().headers(responseHeaders).body(null);
         }
 
 		Jwt jwt = jwtDecoder.decode(idToken);
 
 		Map<String, String> claims = jwt.getClaims().entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, entry -> String.valueOf(entry.getValue())));
-		return ResponseEntity.ok().headers(responseHeaders).body(claims);
+		SessionResponse sessionResponse = SessionResponse.builder().email(claims.get("sub")).role(claims.get("role")).build();
+		return ResponseEntity.ok().headers(responseHeaders).body(sessionResponse);
     }
 
 	@PostMapping("/callback")
