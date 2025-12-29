@@ -2,6 +2,7 @@ package com.example.gatewayserver.controller;
 
 import java.net.URI;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.stereotype.Controller;
@@ -10,11 +11,17 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 @Controller
 public class LoginController {
+    @Value("${authserver.location}")
+    private String authServerLocation;
+
+    @Value("${client.location}")
+    private String clientLocation;
+
     @GetMapping("/login")
     public void authorize(ServerHttpResponse response) {
-        URI uri = UriComponentsBuilder.fromUriString("http://localhost:9000/login").build().toUri();
+        URI uri = UriComponentsBuilder.fromUriString(authServerLocation + "/login").build().toUri();
 		response.getHeaders().setLocation(uri);
-		response.getHeaders().setAccessControlAllowOrigin("http://localhost:8080");
+		response.getHeaders().setAccessControlAllowOrigin(clientLocation);
 		response.setStatusCode(HttpStatus.FOUND);
     }
 }

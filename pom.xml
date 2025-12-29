@@ -80,6 +80,11 @@
 			<groupId>org.springframework.security</groupId>
 			<artifactId>spring-security-oauth2-jose</artifactId>
 		</dependency>
+		<dependency>
+			<groupId>redis.clients</groupId>
+			<artifactId>jedis</artifactId>
+			<version>7.2.0</version>
+		</dependency>
     </dependencies>
 	<dependencyManagement>
 		<dependencies>

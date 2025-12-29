@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.core.ParameterizedTypeReference;
@@ -36,59 +37,46 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.WebSession;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 
 import com.example.gatewayserver.dto.AuthorizationState;
-import com.example.gatewayserver.dto.SessionDTO;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import redis.clients.jedis.RedisClient;
 
 @RestController
 @RequiredArgsConstructor
 public class OAuthController {
+	@Value("${client.location}")
+	private String clientLocation;
+
+	@Value("${authserver.location}")
+	private String authserverLocation;
+
 	private static final ObjectMapper mapper = new ObjectMapper();
 
-	private final CacheManager cacheManager;
 	private final JwtDecoder jwtDecoder;
+	private final RedisClient redisClient;
 
-	@PostMapping("/checkSession")
-	public ResponseEntity<Boolean> checkSession(ServerHttpRequest request) {
-		HttpHeaders responseHeaders = new HttpHeaders();
-		responseHeaders.add("Access-Control-Allow-Origin", "http://localhost:8080");
-		responseHeaders.add("Access-Control-Allow-Credentials", "true");
-
-		List<HttpCookie> cookiesList = request.getCookies().get("JSESSIONID");
-		Cache.ValueWrapper wrapper = cacheManager.getCache("SESSION_CACHE").get(cookiesList.getFirst().getValue());
-		if (wrapper == null) {
-			return ResponseEntity.ok().headers(responseHeaders).body(false);
-		}
-		boolean hasSession = wrapper.get() != null;
-		return ResponseEntity.ok().headers(responseHeaders).body(hasSession);
-	}
-
-    @GetMapping("/openIdSession")
+    @GetMapping("/checkSession")
     public ResponseEntity<Map<String, String>> getOpenIdSession(ServerHttpRequest request) {
         HttpHeaders responseHeaders = new HttpHeaders();
-        responseHeaders.add("Access-Control-Allow-Origin", "http://localhost:8080");
+        responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
         responseHeaders.add("Access-Control-Allow-Credentials", "true");
 
 		List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
-		String openIdSessionId;
+		String idToken;
 		if (!ObjectUtils.isEmpty(rmcCookiesList)) {
-			openIdSessionId = rmcCookiesList.getFirst().getValue() + "_OPENID";
+			idToken = redisClient.get(generateOpenIdTokenKey(rmcCookiesList.getFirst().getValue()));
 		} else {
 			List<HttpCookie> jsessionCookiesList = request.getCookies().get("JSESSIONID");
-			openIdSessionId = jsessionCookiesList.getFirst().getValue() + "_OPENID";
+			idToken = redisClient.get(generateOpenIdTokenKey(jsessionCookiesList.getFirst().getValue()));
 		}
-        Cache.ValueWrapper wrapper = cacheManager.getCache("SESSION_CACHE").get(openIdSessionId);
-        if (wrapper == null || wrapper.get() == null) {
+        if (idToken == null) {
             return ResponseEntity.ok().headers(responseHeaders).body(new HashMap<>());
         }
-        SessionDTO openIdSession = (SessionDTO) wrapper.get();
-		if (openIdSession == null) {
-			return ResponseEntity.ok().headers(responseHeaders).body(new HashMap<>());
-		}
 
-		Jwt jwt = jwtDecoder.decode(openIdSession.token());
+		Jwt jwt = jwtDecoder.decode(idToken);
 
 		Map<String, String> claims = jwt.getClaims().entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, entry -> String.valueOf(entry.getValue())));
 		return ResponseEntity.ok().headers(responseHeaders).body(claims);
@@ -104,7 +92,7 @@ public class OAuthController {
             @RequestParam(required = false) String error) throws IOException {
 		RestTemplate restTemplate = new RestTemplate();
 		ResponseEntity<Boolean> isValidStateResponse = restTemplate.exchange(
-				"http://localhost:9000/authState/verify",
+				authserverLocation + "/authState/verify",
 				HttpMethod.POST,
 				new HttpEntity<>(state),
 				Boolean.class
@@ -131,7 +119,7 @@ public class OAuthController {
 
 		HttpEntity<MultiValueMap<String, String>> tokenRequest = new HttpEntity<>(body, headers);
 		ResponseEntity<Map> tokenResponse = restTemplate.exchange(
-				"http://localhost:9000/oauth2/token",
+				authserverLocation + "/oauth2/token",
 				HttpMethod.POST,
 				tokenRequest,
 				Map.class
@@ -143,21 +131,12 @@ public class OAuthController {
 
 			List<HttpCookie> cookiesList = request.getCookies().get("JSESSIONID");
 
-            String jSessionID = cookiesList.getFirst().getValue();
-			SessionDTO sessionDTO = SessionDTO.builder()
-					.sessionId(jSessionID)
-					.token(accessToken)
-					.build();
-			cacheManager.getCache("SESSION_CACHE").put(jSessionID, sessionDTO);
+            String jSessionId = cookiesList.getFirst().getValue();
+			redisClient.set(generateAccessTokenKey(jSessionId), accessToken);
 
-            String openIdSessionId;
 			if (authState.rememberMe()) {
 				String rememberMeCookieId = UUID.randomUUID().toString();
-				SessionDTO rememberMeSession = SessionDTO.builder()
-						.sessionId(rememberMeCookieId)
-						.token(refreshToken)
-						.build();
-				cacheManager.getCache("SESSION_CACHE").put(rememberMeCookieId, rememberMeSession);
+				redisClient.set(generateRefreshTokenKey(rememberMeCookieId), refreshToken);
 
 				ResponseCookie rememberMeCookie = ResponseCookie.from("RMC", rememberMeCookieId)
 						.maxAge(Duration.ofHours(8))
@@ -170,19 +149,9 @@ public class OAuthController {
 						.build();
 				response.addCookie(rememberMeCookie);
 
-                openIdSessionId = rememberMeCookieId + "_OPENID";
-                SessionDTO openIdSession = SessionDTO.builder()
-                        .sessionId(openIdSessionId)
-                        .token(idToken)
-                        .build();
-                cacheManager.getCache("SESSION_CACHE").put(openIdSessionId, openIdSession);
+                redisClient.set(generateOpenIdTokenKey(rememberMeCookieId), idToken);
 			} else {
-                openIdSessionId = jSessionID + "_OPENID";
-                SessionDTO openIdSession = SessionDTO.builder()
-                        .sessionId(openIdSessionId)
-                        .token(idToken)
-                        .build();
-                cacheManager.getCache("SESSION_CACHE").put(openIdSessionId, openIdSession);
+                redisClient.set(generateOpenIdTokenKey(jSessionId), idToken);
             }
 
 			HttpHeaders responseHeaders = new HttpHeaders();
@@ -192,5 +161,17 @@ public class OAuthController {
 		} else {
 			return ResponseEntity.status(tokenResponse.getStatusCode()).body("Failed to retrieve access token");
 		}
+	}
+
+	private String generateAccessTokenKey(String id) {
+		return "access_token#" + id;
+	}
+
+	private String generateRefreshTokenKey(String id) {
+		return "refresh_token#" + id;
+	}
+
+	private String generateOpenIdTokenKey(String id) {
+		return "openid_token#" + id;
 	}
 }
