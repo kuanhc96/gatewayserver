@@ -33,11 +33,13 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.WebSession;
 
 import com.example.gatewayserver.dto.SessionResponse;
+import com.example.gatewayserver.dto.TokenResponse;
 import lombok.RequiredArgsConstructor;
 
 import com.example.gatewayserver.dto.AuthorizationState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import redis.clients.jedis.RedisClient;
+import redis.clients.jedis.params.SetParams;
 
 @RestController
 @RequiredArgsConstructor
@@ -48,10 +50,14 @@ public class OAuthController {
 	@Value("${authserver.location}")
 	private String authserverLocation;
 
+	@Value("${rememberme.expiration-hours:8}")
+	private Integer rememberMeExpirationHours;
+
 	private static final ObjectMapper mapper = new ObjectMapper();
 
 	private final JwtDecoder jwtDecoder;
 	private final RedisClient redisClient;
+	private final RestTemplate restTemplate;
 
     @GetMapping("/checkSession")
     public ResponseEntity<SessionResponse> getOpenIdSession(ServerHttpRequest request) {
@@ -86,56 +92,29 @@ public class OAuthController {
             @RequestParam(required = false) String code,
 			@RequestParam(required = false) String state,
             @RequestParam(required = false) String error) throws IOException {
-		RestTemplate restTemplate = new RestTemplate();
-		ResponseEntity<Boolean> isValidStateResponse = restTemplate.exchange(
-				authserverLocation + "/authState/verify",
-				HttpMethod.POST,
-				new HttpEntity<>(state),
-				Boolean.class
-		);
 
-		if (!isValidStateResponse.getBody()) {
-			throw new SecurityException("Invalid state parameter");
-		}
+		verifyState(state);
+		AuthorizationState authState = parseState(state);
 
-		String[] parts = state.split("\\.");
-		String payload = parts[0];
-		byte[] jsonBytes = Base64.getUrlDecoder().decode(payload);
-		AuthorizationState authState = mapper.readValue(jsonBytes, AuthorizationState.class);
+		ResponseEntity<TokenResponse> tokenResponse = sendTokenRequest(code, state);
 
-		HttpHeaders headers = new HttpHeaders();
-		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-		MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-		body.add("grant_type", "authorization_code");
-		body.add("code", code);
-		body.add("state", state);
-		body.add("redirect_uri", "http://localhost:8080/callback");
-		body.add("client_id", "fe-client");
-		body.add("client_secret", "secret1");
-
-		HttpEntity<MultiValueMap<String, String>> tokenRequest = new HttpEntity<>(body, headers);
-		ResponseEntity<Map> tokenResponse = restTemplate.exchange(
-				authserverLocation + "/oauth2/token",
-				HttpMethod.POST,
-				tokenRequest,
-				Map.class
-		);
 		if (tokenResponse.getStatusCode() == HttpStatus.OK && tokenResponse.getBody() != null) {
-            String accessToken = tokenResponse.getBody().get("access_token").toString();
-            String refreshToken = tokenResponse.getBody().get("refresh_token").toString();
-            String idToken = tokenResponse.getBody().get("id_token").toString();
+            String accessToken = tokenResponse.getBody().access_token();
+            String refreshToken = tokenResponse.getBody().refresh_token();
+            String idToken = tokenResponse.getBody().id_token();
+			Integer expiresIn = tokenResponse.getBody().expires_in();
 
-			List<HttpCookie> cookiesList = request.getCookies().get("JSESSIONID");
+			String jSessionId = request.getCookies().get("JSESSIONID").getFirst().getValue();
 
-            String jSessionId = cookiesList.getFirst().getValue();
-			redisClient.set(generateAccessTokenKey(jSessionId), accessToken);
+			redisClient.set(generateAccessTokenKey(jSessionId), accessToken, SetParams.setParams().nx().ex(expiresIn));
 
 			if (authState.rememberMe()) {
+				Long rememberMeExpirationSeconds = rememberMeExpirationHours * 3600L;
 				String rememberMeCookieId = UUID.randomUUID().toString();
-				redisClient.set(generateRefreshTokenKey(rememberMeCookieId), refreshToken);
+				redisClient.set(generateRefreshTokenKey(rememberMeCookieId), refreshToken, SetParams.setParams().nx().ex(rememberMeExpirationSeconds));
 
 				ResponseCookie rememberMeCookie = ResponseCookie.from("RMC", rememberMeCookieId)
-						.maxAge(Duration.ofHours(8))
+						.maxAge(Duration.ofHours(rememberMeExpirationHours))
 						.domain(null)
 						.path("/")
 						.httpOnly(true)
@@ -145,13 +124,13 @@ public class OAuthController {
 						.build();
 				response.addCookie(rememberMeCookie);
 
-                redisClient.set(generateOpenIdTokenKey(rememberMeCookieId), idToken);
+                redisClient.set(generateOpenIdTokenKey(rememberMeCookieId), idToken, SetParams.setParams().nx().ex(rememberMeExpirationSeconds));
 			} else {
-                redisClient.set(generateOpenIdTokenKey(jSessionId), idToken);
+                redisClient.set(generateOpenIdTokenKey(jSessionId), idToken, SetParams.setParams().nx().ex(expiresIn));
             }
 
 			HttpHeaders responseHeaders = new HttpHeaders();
-			responseHeaders.add("Access-Control-Allow-Origin", "http://localhost:8080");
+			responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
 			responseHeaders.add("Access-Control-Allow-Credentials", "true");
 			return ResponseEntity.ok().headers(responseHeaders).body(Map.of("successUrl", authState.successUrl()));
 		} else {
@@ -169,5 +148,46 @@ public class OAuthController {
 
 	private String generateOpenIdTokenKey(String id) {
 		return "openid_token#" + id;
+	}
+
+	private void verifyState(String state) {
+		ResponseEntity<Boolean> isValidStateResponse = restTemplate.exchange(
+				authserverLocation + "/authState/verify",
+				HttpMethod.POST,
+				new HttpEntity<>(state),
+				Boolean.class
+		);
+
+		if (!isValidStateResponse.getBody()) {
+			throw new SecurityException("Invalid state parameter");
+		}
+	}
+
+	private AuthorizationState parseState(String state) throws IOException {
+		String[] parts = state.split("\\.");
+		String payload = parts[0];
+		byte[] jsonBytes = Base64.getUrlDecoder().decode(payload);
+		return mapper.readValue(jsonBytes, AuthorizationState.class);
+	}
+
+	private ResponseEntity<TokenResponse> sendTokenRequest(String code, String state) {
+		HttpHeaders headers = new HttpHeaders();
+		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+		MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+		body.add("grant_type", "authorization_code");
+		body.add("code", code);
+		body.add("state", state);
+		body.add("redirect_uri", clientLocation + "/callback"); // is this needed in the token API request?
+		body.add("client_id", "fe-client");
+		body.add("client_secret", "secret1");
+
+		HttpEntity<MultiValueMap<String, String>> tokenRequest = new HttpEntity<>(body, headers);
+		return restTemplate.exchange(
+				authserverLocation + "/oauth2/token",
+				HttpMethod.POST,
+				tokenRequest,
+				TokenResponse.class
+		);
+
 	}
 }
