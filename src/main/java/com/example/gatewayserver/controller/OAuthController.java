@@ -74,13 +74,18 @@ public class OAuthController {
 			idToken = redisClient.get(generateOpenIdTokenKey(jsessionCookiesList.getFirst().getValue()));
 		}
         if (idToken == null) {
-            return ResponseEntity.ok().headers(responseHeaders).body(null);
+			SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
+            return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
         }
 
 		Jwt jwt = jwtDecoder.decode(idToken);
 
 		Map<String, String> claims = jwt.getClaims().entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, entry -> String.valueOf(entry.getValue())));
-		SessionResponse sessionResponse = SessionResponse.builder().email(claims.get("sub")).role(claims.get("role")).build();
+		SessionResponse sessionResponse = SessionResponse.builder()
+				.userGUID(claims.get("userGUID"))
+				.email(claims.get("sub"))
+				.role(claims.get("role"))
+				.build();
 		return ResponseEntity.ok().headers(responseHeaders).body(sessionResponse);
     }
 
