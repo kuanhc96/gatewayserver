@@ -6,6 +6,9 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 
+import feign.codec.Encoder;
+import feign.form.spring.SpringFormEncoder;
+
 @Configuration
 public class AuthServerConfig {
     @Value("${authserver.location:http://localhost:9000}")
@@ -14,5 +17,10 @@ public class AuthServerConfig {
     @Bean
     public JwtDecoder jwtDecoder() {
         return NimbusJwtDecoder.withIssuerLocation(authServerLocation).build();
+    }
+
+    @Bean
+    public Encoder feignFormEncoder() {
+        return new SpringFormEncoder();
     }
 }
