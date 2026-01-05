@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpCookie;
 import org.springframework.http.HttpHeaders;
@@ -56,15 +57,41 @@ public class OAuthController {
         responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
         responseHeaders.add("Access-Control-Allow-Credentials", "true");
 
-		List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
 		String idToken;
-		if (!ObjectUtils.isEmpty(rmcCookiesList)) {
-			idToken = redisClient.get(generateOpenIdTokenKey(rmcCookiesList.getFirst().getValue()));
+		// check if the user has a valid access token associated with the session
+		// get the current session's JSESSIONID cookie
+		List<HttpCookie> jsessionCookiesList = request.getCookies().get("JSESSIONID");
+		String jSessionId = jsessionCookiesList.getFirst().getValue();
+
+		// get the accessToken and idToken associated with the JSESSIONID from redis
+		String accessToken = redisClient.get(generateAccessTokenKey(jSessionId));
+		if (StringUtils.isBlank(accessToken)) {
+			idToken = redisClient.get(generateOpenIdTokenKey(jSessionId));
 		} else {
-			List<HttpCookie> jsessionCookiesList = request.getCookies().get("JSESSIONID");
-			idToken = redisClient.get(generateOpenIdTokenKey(jsessionCookiesList.getFirst().getValue()));
+			// access token expired
+			List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
+			if (!ObjectUtils.isEmpty(rmcCookiesList)) {
+				// user previously selected the "remember me" option
+
+				// get rememberMeCookie
+				String rememberMeCookie = rmcCookiesList.getFirst().getValue();
+
+				// get the idToken associated with the rememberMeCookie from redis
+				idToken = redisClient.get(generateOpenIdTokenKey(rememberMeCookie));
+
+				// get the refreshToken associated with the rememberMeCookie from redis
+				String refreshToken = redisClient.get(generateRefreshTokenKey(rememberMeCookie));
+
+				// use the refresh token to get a new access token
+				TokenResponse tokenResponse = sendTokenRequest(refreshToken);
+				accessToken = tokenResponse.access_token();
+			} else {
+				idToken = null;
+			}
 		}
-        if (idToken == null) {
+
+
+        if (StringUtils.isAnyBlank(accessToken, idToken)) {
 			SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
             return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
         }
@@ -170,5 +197,14 @@ public class OAuthController {
 				"secret1",
 				state
 		);
+	}
+
+	private TokenResponse sendTokenRequest(String refreshToken) {
+		return authServerClient.getToken(
+				"refresh_token",
+				"fe-client",
+				"secret1",
+				refreshToken
+			);
 	}
 }
