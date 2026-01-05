@@ -5,9 +5,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
-
-import feign.codec.Encoder;
-import feign.form.spring.SpringFormEncoder;
+import org.springframework.web.client.RestTemplate;
 
 @Configuration
 public class AuthServerConfig {
@@ -20,7 +18,7 @@ public class AuthServerConfig {
     }
 
     @Bean
-    public Encoder feignFormEncoder() {
-        return new SpringFormEncoder();
+    public RestTemplate authServerClient() {
+        return new RestTemplate();
     }
 }
