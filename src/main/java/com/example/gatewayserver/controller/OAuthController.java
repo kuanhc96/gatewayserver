@@ -99,7 +99,7 @@ public class OAuthController {
 		}
 
 
-        if (StringUtils.isAnyBlank(accessToken, idToken)) {
+        if (StringUtils.isBlank(accessToken) || StringUtils.isBlank(idToken)) {
 			SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
             return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
         }
