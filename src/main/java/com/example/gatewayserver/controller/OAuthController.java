@@ -3,12 +3,12 @@ package com.example.gatewayserver.controller;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpCookie;
 import org.springframework.http.HttpEntity;
@@ -47,8 +47,8 @@ public class OAuthController {
 	@Value("${client.location}")
 	private String clientLocation;
 
-	@Value("${authserver.location}")
-	private String authserverLocation;
+	@Value("${authserver.location:http://localhost:9000}")
+	private String authServerLocation;
 
 	@Value("${rememberme.expiration-hours:8}")
 	private Integer rememberMeExpirationHours;
@@ -57,7 +57,7 @@ public class OAuthController {
 
 	private final JwtDecoder jwtDecoder;
 	private final RedisClient redisClient;
-	private final RestTemplate restTemplate;
+	private final RestTemplate authServerClient;
 
     @GetMapping("/checkSession")
     public ResponseEntity<SessionResponse> getOpenIdSession(ServerHttpRequest request) {
@@ -65,15 +65,41 @@ public class OAuthController {
         responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
         responseHeaders.add("Access-Control-Allow-Credentials", "true");
 
-		List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
 		String idToken;
-		if (!ObjectUtils.isEmpty(rmcCookiesList)) {
-			idToken = redisClient.get(generateOpenIdTokenKey(rmcCookiesList.getFirst().getValue()));
+		// check if the user has a valid access token associated with the session
+		// get the current session's JSESSIONID cookie
+		List<HttpCookie> jsessionCookiesList = request.getCookies().get("JSESSIONID");
+		String jSessionId = jsessionCookiesList.getFirst().getValue();
+
+		// get the accessToken and idToken associated with the JSESSIONID from redis
+		String accessToken = redisClient.get(generateAccessTokenKey(jSessionId));
+		if (StringUtils.isBlank(accessToken)) {
+			idToken = redisClient.get(generateOpenIdTokenKey(jSessionId));
 		} else {
-			List<HttpCookie> jsessionCookiesList = request.getCookies().get("JSESSIONID");
-			idToken = redisClient.get(generateOpenIdTokenKey(jsessionCookiesList.getFirst().getValue()));
+			// access token expired
+			List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
+			if (!ObjectUtils.isEmpty(rmcCookiesList)) {
+				// user previously selected the "remember me" option
+
+				// get rememberMeCookie
+				String rememberMeCookie = rmcCookiesList.getFirst().getValue();
+
+				// get the idToken associated with the rememberMeCookie from redis
+				idToken = redisClient.get(generateOpenIdTokenKey(rememberMeCookie));
+
+				// get the refreshToken associated with the rememberMeCookie from redis
+				String refreshToken = redisClient.get(generateRefreshTokenKey(rememberMeCookie));
+
+				// use the refresh token to get a new access token
+				TokenResponse tokenResponse = sendTokenRequest(refreshToken);
+				accessToken = tokenResponse.access_token();
+			} else {
+				idToken = null;
+			}
 		}
-        if (idToken == null) {
+
+
+        if (StringUtils.isBlank(accessToken) || StringUtils.isBlank(idToken)) {
 			SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
             return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
         }
@@ -101,13 +127,13 @@ public class OAuthController {
 		verifyState(state);
 		AuthorizationState authState = parseState(state);
 
-		ResponseEntity<TokenResponse> tokenResponse = sendTokenRequest(code, state);
+		TokenResponse tokenResponse = sendTokenRequest(code, state);
 
-		if (tokenResponse.getStatusCode() == HttpStatus.OK && tokenResponse.getBody() != null) {
-            String accessToken = tokenResponse.getBody().access_token();
-            String refreshToken = tokenResponse.getBody().refresh_token();
-            String idToken = tokenResponse.getBody().id_token();
-			Integer expiresIn = tokenResponse.getBody().expires_in();
+		if (tokenResponse != null) {
+            String accessToken = tokenResponse.access_token();
+            String refreshToken = tokenResponse.refresh_token();
+            String idToken = tokenResponse.id_token();
+			Integer expiresIn = tokenResponse.expires_in();
 
 			String jSessionId = request.getCookies().get("JSESSIONID").getFirst().getValue();
 
@@ -139,7 +165,7 @@ public class OAuthController {
 			responseHeaders.add("Access-Control-Allow-Credentials", "true");
 			return ResponseEntity.ok().headers(responseHeaders).body(Map.of("successUrl", authState.successUrl()));
 		} else {
-			return ResponseEntity.status(tokenResponse.getStatusCode()).body("Failed to retrieve access token");
+			return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Failed to retrieve access token");
 		}
 	}
 
@@ -156,14 +182,14 @@ public class OAuthController {
 	}
 
 	private void verifyState(String state) {
-		ResponseEntity<Boolean> isValidStateResponse = restTemplate.exchange(
-				authserverLocation + "/authState/verify",
+		Boolean isValidStateResponse = authServerClient.exchange(
+				authServerLocation + "/authState/verify",
 				HttpMethod.POST,
 				new HttpEntity<>(state),
 				Boolean.class
-		);
+		).getBody();
 
-		if (!isValidStateResponse.getBody()) {
+		if (!isValidStateResponse) {
 			throw new SecurityException("Invalid state parameter");
 		}
 	}
@@ -175,7 +201,7 @@ public class OAuthController {
 		return mapper.readValue(jsonBytes, AuthorizationState.class);
 	}
 
-	private ResponseEntity<TokenResponse> sendTokenRequest(String code, String state) {
+	private TokenResponse sendTokenRequest(String code, String state) {
 		HttpHeaders headers = new HttpHeaders();
 		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
 		MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
@@ -185,14 +211,30 @@ public class OAuthController {
 		body.add("redirect_uri", clientLocation + "/callback"); // is this needed in the token API request?
 		body.add("client_id", "fe-client");
 		body.add("client_secret", "secret1");
-
 		HttpEntity<MultiValueMap<String, String>> tokenRequest = new HttpEntity<>(body, headers);
-		return restTemplate.exchange(
-				authserverLocation + "/oauth2/token",
+		return authServerClient.exchange(
+				authServerLocation + "/oauth2/token",
 				HttpMethod.POST,
 				tokenRequest,
 				TokenResponse.class
-		);
+		).getBody();
+	}
 
+	private TokenResponse sendTokenRequest(String refreshToken) {
+		HttpHeaders headers = new HttpHeaders();
+		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+		MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
+		body.add("grant_type", "refresh_token");
+		body.add("redirect_uri", clientLocation + "/callback"); // is this needed in the token API request?
+		body.add("client_id", "fe-client");
+		body.add("client_secret", "secret1");
+		body.add("refresh_token", refreshToken);
+		HttpEntity<MultiValueMap<String, String>> tokenRequest = new HttpEntity<>(body, headers);
+		return authServerClient.exchange(
+				authServerLocation + "/oauth2/token",
+				HttpMethod.POST,
+				tokenRequest,
+				TokenResponse.class
+		).getBody();
 	}
 }
