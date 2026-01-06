@@ -65,7 +65,6 @@ public class OAuthController {
         responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
         responseHeaders.add("Access-Control-Allow-Credentials", "true");
 
-		String idToken;
 		// check if the user has a valid access token associated with the session
 		// get the current session's JSESSIONID cookie
 		List<HttpCookie> jsessionCookiesList = request.getCookies().get("JSESSIONID");
@@ -73,36 +72,36 @@ public class OAuthController {
 
 		// get the accessToken and idToken associated with the JSESSIONID from redis
 		String accessToken = redisClient.get(generateAccessTokenKey(jSessionId));
+		String idToken = redisClient.get(generateOpenIdTokenKey(jSessionId));
 		if (StringUtils.isBlank(accessToken)) {
-			idToken = redisClient.get(generateOpenIdTokenKey(jSessionId));
-		} else {
 			// access token expired
 			List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
 			if (!ObjectUtils.isEmpty(rmcCookiesList)) {
 				// user previously selected the "remember me" option
 
 				// get rememberMeCookie
-				String rememberMeCookie = rmcCookiesList.getFirst().getValue();
-
-				// get the idToken associated with the rememberMeCookie from redis
-				idToken = redisClient.get(generateOpenIdTokenKey(rememberMeCookie));
+				String rememberMeCookieId = rmcCookiesList.getFirst().getValue();
 
 				// get the refreshToken associated with the rememberMeCookie from redis
-				String refreshToken = redisClient.get(generateRefreshTokenKey(rememberMeCookie));
+				String refreshToken = redisClient.get(generateRefreshTokenKey(rememberMeCookieId));
 
 				// use the refresh token to get a new access token
 				TokenResponse tokenResponse = sendTokenRequest(refreshToken);
-				accessToken = tokenResponse.access_token();
+				if (tokenResponse == null) {
+					// rememberMe token is invalid/expired
+					SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
+					return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
+				} else {
+					accessToken = tokenResponse.access_token();
+					idToken = tokenResponse.id_token();
+					redisClient.set(generateAccessTokenKey(accessToken), accessToken, SetParams.setParams().nx().ex(rememberMeExpirationHours * 3600L));
+					redisClient.set(generateOpenIdTokenKey(rememberMeCookieId), idToken, SetParams.setParams().nx().ex(rememberMeExpirationHours * 3600L));
+				}
 			} else {
-				idToken = null;
+				SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
+				return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
 			}
 		}
-
-
-        if (StringUtils.isBlank(accessToken) || StringUtils.isBlank(idToken)) {
-			SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
-            return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
-        }
 
 		Jwt jwt = jwtDecoder.decode(idToken);
 
