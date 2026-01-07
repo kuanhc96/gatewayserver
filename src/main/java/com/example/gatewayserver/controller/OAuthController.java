@@ -27,6 +27,7 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.util.ObjectUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
@@ -42,6 +43,7 @@ import redis.clients.jedis.RedisClient;
 import redis.clients.jedis.params.SetParams;
 
 @RestController
+@RequestMapping("/api/oauth")
 @RequiredArgsConstructor
 public class OAuthController {
 	@Value("${client.location}")
@@ -59,7 +61,7 @@ public class OAuthController {
 	private final RedisClient redisClient;
 	private final RestTemplate authServerClient;
 
-    @GetMapping("/checkSession")
+    @GetMapping("/status")
     public ResponseEntity<SessionResponse> getOpenIdSession(ServerHttpRequest request) {
         HttpHeaders responseHeaders = new HttpHeaders();
         responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
@@ -114,7 +116,7 @@ public class OAuthController {
 		return ResponseEntity.ok().headers(responseHeaders).body(sessionResponse);
     }
 
-	@PostMapping("/callback")
+	@PostMapping("/tokens")
 	public ResponseEntity<?> callback(
 			ServerHttpRequest request,
 			ServerHttpResponse response,

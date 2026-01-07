@@ -1,5 +1,7 @@
 package com.example.gatewayserver.config;
 
+import org.springframework.cloud.gateway.route.RouteLocator;
+import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -11,15 +13,16 @@ import redis.clients.jedis.RedisClient;
 public class RouteConfig {
     private final RedisClient redisClient;
 
-//    @Bean
-//    public RouteLocator routeConfig(RouteLocatorBuilder routeLocatorBuilder) {
-//
-//        return routeLocatorBuilder.routes()
-//                .route(p -> p
-//                        .path("*")
-//                        .filters(
-//                                f -> f.addRequestHeader("Authorization", )
-//                        )
-//                )
-//    }
+    @Bean
+    public RouteLocator routeConfig(RouteLocatorBuilder routeLocatorBuilder) {
+
+        return routeLocatorBuilder.routes()
+                .route(p -> p
+                        .path("/freelance/**")
+                        .filters(
+                    f -> f.rewritePath("/freelance/(?<segment>.*)", "/api/${segment}")
+                        )
+                        .uri("lb://FREELANCE-RESOURCE-BACKEND")
+                ).build();
+    }
 }
