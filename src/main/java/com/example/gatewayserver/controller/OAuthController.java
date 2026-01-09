@@ -33,6 +33,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.WebSession;
 
+import com.example.gatewayserver.client.AuthServerClient;
 import com.example.gatewayserver.dto.SessionResponse;
 import com.example.gatewayserver.dto.TokenResponse;
 import lombok.RequiredArgsConstructor;
@@ -59,10 +60,11 @@ public class OAuthController {
 
 	private final JwtDecoder jwtDecoder;
 	private final RedisClient redisClient;
-	private final RestTemplate authServerClient;
+	private final RestTemplate authServerRedirectClient;
+	private final AuthServerClient authServerClient;
 
     @GetMapping("/status")
-    public ResponseEntity<SessionResponse> getOpenIdSession(ServerHttpRequest request) {
+    public ResponseEntity<SessionResponse> getOpenIdSession(ServerHttpRequest request, ServerHttpResponse response) {
         HttpHeaders responseHeaders = new HttpHeaders();
         responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
         responseHeaders.add("Access-Control-Allow-Credentials", "true");
@@ -70,39 +72,60 @@ public class OAuthController {
 		// check if the user has a valid access token associated with the session
 		// get the current session's JSESSIONID cookie
 		List<HttpCookie> jsessionCookiesList = request.getCookies().get("JSESSIONID");
-		String jSessionId = jsessionCookiesList.getFirst().getValue();
-
-		// get the accessToken and idToken associated with the JSESSIONID from redis
-		String accessToken = redisClient.get(generateAccessTokenKey(jSessionId));
-		String idToken = redisClient.get(generateOpenIdTokenKey(jSessionId));
-		if (StringUtils.isBlank(accessToken)) {
+		List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
+		String jSessionId = null;
+		String accessToken = null;
+		String idToken = null;
+		if (ObjectUtils.isEmpty(rmcCookiesList) && ObjectUtils.isEmpty(jsessionCookiesList)) {
+			SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
+			return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
+		} else if (!ObjectUtils.isEmpty(rmcCookiesList)) {
 			// access token expired
-			List<HttpCookie> rmcCookiesList = request.getCookies().get("RMC");
-			if (!ObjectUtils.isEmpty(rmcCookiesList)) {
-				// user previously selected the "remember me" option
+			// user previously selected the "remember me" option
 
-				// get rememberMeCookie
-				String rememberMeCookieId = rmcCookiesList.getFirst().getValue();
+			// get rememberMeCookie
+			String rememberMeCookieId = rmcCookiesList.getFirst().getValue();
 
-				// get the refreshToken associated with the rememberMeCookie from redis
-				String refreshToken = redisClient.get(generateRefreshTokenKey(rememberMeCookieId));
+			// get the refreshToken associated with the rememberMeCookie from redis
+			String refreshToken = redisClient.get(generateRefreshTokenKey(rememberMeCookieId));
 
-				// use the refresh token to get a new access token
-				TokenResponse tokenResponse = sendTokenRequest(refreshToken);
-				if (tokenResponse == null) {
-					// rememberMe token is invalid/expired
-					SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
-					return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
-				} else {
-					accessToken = tokenResponse.access_token();
-					idToken = tokenResponse.id_token();
-					redisClient.set(generateAccessTokenKey(accessToken), accessToken, SetParams.setParams().nx().ex(rememberMeExpirationHours * 3600L));
-					redisClient.set(generateOpenIdTokenKey(rememberMeCookieId), idToken, SetParams.setParams().nx().ex(rememberMeExpirationHours * 3600L));
-				}
+			// use the refresh token to get a new access token
+			TokenResponse tokenResponse = sendTokenRequest(refreshToken);
+			if (tokenResponse == null) {
+				// rememberMe token is invalid/expired
+				SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
+				return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
 			} else {
+				accessToken = tokenResponse.access_token();
+				idToken = tokenResponse.id_token();
+				String newRefreshToken = tokenResponse.refresh_token();
+				redisClient.set(generateAccessTokenKey(accessToken), accessToken, SetParams.setParams().nx().ex(rememberMeExpirationHours * 3600L));
+				redisClient.set(generateOpenIdTokenKey(accessToken), idToken, SetParams.setParams().nx().ex(rememberMeExpirationHours * 3600L));
+				Long rememberMeExpirationSeconds = rememberMeExpirationHours * 3600L;
+				String newRememberMeCookieId = UUID.randomUUID().toString();
+				redisClient.set(generateRefreshTokenKey(newRememberMeCookieId), newRefreshToken, SetParams.setParams().nx().ex(rememberMeExpirationSeconds));
+
+				ResponseCookie rememberMeCookie = ResponseCookie.from("RMC", newRememberMeCookieId)
+						.maxAge(Duration.ofHours(rememberMeExpirationHours))
+						.domain(null)
+						.path("/")
+						.httpOnly(true)
+						.secure(true)
+						.sameSite("Strict")
+						.partitioned(false)
+						.build();
+				response.addCookie(rememberMeCookie);
+
+			}
+		} else if (!ObjectUtils.isEmpty(jsessionCookiesList)) {
+			jSessionId = jsessionCookiesList.getFirst().getValue();
+			// get the accessToken and idToken associated with the JSESSIONID from redis
+			accessToken = redisClient.get(generateAccessTokenKey(jSessionId));
+			if (StringUtils.isBlank(accessToken)) {
 				SessionResponse emptySession = SessionResponse.builder().email("").role("").userGUID("").build();
 				return ResponseEntity.ok().headers(responseHeaders).body(emptySession);
 			}
+			idToken = redisClient.get(generateOpenIdTokenKey(jSessionId));
 		}
 
 		Jwt jwt = jwtDecoder.decode(idToken);
@@ -156,10 +179,8 @@ public class OAuthController {
 						.build();
 				response.addCookie(rememberMeCookie);
 
-                redisClient.set(generateOpenIdTokenKey(rememberMeCookieId), idToken, SetParams.setParams().nx().ex(rememberMeExpirationSeconds));
-			} else {
-                redisClient.set(generateOpenIdTokenKey(jSessionId), idToken, SetParams.setParams().nx().ex(expiresIn));
-            }
+			}
+			redisClient.set(generateOpenIdTokenKey(jSessionId), idToken, SetParams.setParams().nx().ex(expiresIn));
 
 			HttpHeaders responseHeaders = new HttpHeaders();
 			responseHeaders.add("Access-Control-Allow-Origin", clientLocation);
@@ -183,14 +204,9 @@ public class OAuthController {
 	}
 
 	private void verifyState(String state) {
-		Boolean isValidStateResponse = authServerClient.exchange(
-				authServerLocation + "/authState/verify",
-				HttpMethod.POST,
-				new HttpEntity<>(state),
-				Boolean.class
-		).getBody();
+		Boolean isValidStateResponse = authServerClient.verifyAuthorizationState(state);
 
-		if (!isValidStateResponse) {
+		if (isValidStateResponse == null || !isValidStateResponse) {
 			throw new SecurityException("Invalid state parameter");
 		}
 	}
@@ -213,7 +229,7 @@ public class OAuthController {
 		body.add("client_id", "fe-client");
 		body.add("client_secret", "secret1");
 		HttpEntity<MultiValueMap<String, String>> tokenRequest = new HttpEntity<>(body, headers);
-		return authServerClient.exchange(
+		return authServerRedirectClient.exchange(
 				authServerLocation + "/oauth2/token",
 				HttpMethod.POST,
 				tokenRequest,
@@ -222,6 +238,9 @@ public class OAuthController {
 	}
 
 	private TokenResponse sendTokenRequest(String refreshToken) {
+		if (StringUtils.isBlank(refreshToken)) {
+			return null;
+		}
 		HttpHeaders headers = new HttpHeaders();
 		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
 		MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
@@ -231,7 +250,7 @@ public class OAuthController {
 		body.add("client_secret", "secret1");
 		body.add("refresh_token", refreshToken);
 		HttpEntity<MultiValueMap<String, String>> tokenRequest = new HttpEntity<>(body, headers);
-		return authServerClient.exchange(
+		return authServerRedirectClient.exchange(
 				authServerLocation + "/oauth2/token",
 				HttpMethod.POST,
 				tokenRequest,
