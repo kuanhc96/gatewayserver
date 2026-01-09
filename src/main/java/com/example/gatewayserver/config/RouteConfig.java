@@ -14,7 +14,7 @@ public class RouteConfig {
     private final RedisClient redisClient;
 
     @Bean
-    public RouteLocator routeConfig(RouteLocatorBuilder routeLocatorBuilder) {
+    public RouteLocator routeFilterConfig(RouteLocatorBuilder routeLocatorBuilder) {
 
         return routeLocatorBuilder.routes()
                 .route(p -> p

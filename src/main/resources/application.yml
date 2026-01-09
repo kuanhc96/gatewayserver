@@ -5,6 +5,14 @@ spring:
     import: "configserver:http://localhost:8071/"
   main:
     web-application-type: reactive
+  security:
+    oauth2:
+      client:
+        registration:
+          freelance-authserver:
+            client-id: gateway-server-client
+            client-secret: gatewayServerSecret
+            scope: AUTHENTICATION_SERVER
   cloud:
     gateway:
       server:
