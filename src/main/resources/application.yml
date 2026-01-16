@@ -20,18 +20,6 @@ spring:
           discovery:
             locator:
               enabled: true
-          globalcors:
-            cors-configurations:
-              '[/**]':
-                allowedOrigins: "*"
-                allowedMethods:
-                  - GET
-                  - POST
-                  - PUT
-                  - DELETE
-                  - OPTIONS
-                  - PATCH
-                allowedHeaders: "*"
   data:
     redis:
       host: localhost
