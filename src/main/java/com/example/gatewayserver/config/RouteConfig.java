@@ -18,7 +18,7 @@ public class RouteConfig {
 
         return routeLocatorBuilder.routes()
                 .route(p -> p
-                        .path("/freelance/**")
+                        .path("/freelance-resource-backend/freelance/**")
                         .filters(
                     f -> f.rewritePath("/freelance/(?<segment>.*)", "/api/${segment}")
                         )
