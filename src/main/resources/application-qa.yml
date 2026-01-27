@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: "gatewayserver"
+  config:
+    import: "configserver:http://localhost:8071/"
+
+info:
+    app:
+        name: "${spring.application.name}"
+        description: "Gateway Server Application"
+        version: "1.0.0"
