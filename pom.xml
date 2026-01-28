@@ -123,11 +123,6 @@
 				<artifactId>jib-maven-plugin</artifactId>
 				<version>3.4.6</version>
 				<configuration>
-					<from>
-						<image>
-							azul/zulu-openjdk:21.0.4
-						</image>
-					</from>
 					<to>
 						<image>kuanskchen344/gatewaytest:garmin</image>
 					</to>
